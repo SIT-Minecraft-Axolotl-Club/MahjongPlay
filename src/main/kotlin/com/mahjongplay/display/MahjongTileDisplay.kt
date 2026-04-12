@@ -129,12 +129,10 @@ class MahjongTileDisplay(
         @Suppress("UnstableApiUsage")
         fun createTileItem(tile: MahjongTile): ItemStack {
             val item = ItemStack(Material.PAPER)
-            item.setData(
-                DataComponentTypes.CUSTOM_MODEL_DATA,
-                CustomModelData.customModelData()
-                    .addFloat((tile.code + 1).toFloat())
-                    .build()
-            )
+            val cmd = CustomModelData.customModelData()
+                .addFloat((tile.code + 1500).toFloat())
+                .build()
+            item.setData(DataComponentTypes.CUSTOM_MODEL_DATA, cmd)
             return item
         }
     }
