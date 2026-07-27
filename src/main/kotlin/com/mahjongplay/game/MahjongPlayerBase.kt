@@ -138,7 +138,9 @@ abstract class MahjongPlayerBase {
 
     fun kakan(tile: MahjongTile, onKakan: (MahjongPlayerBase) -> Unit = {}) {
         onKakan.invoke(this)
-        val minKotsu = fuuroList.find { tile in it.tiles && it.mentsu is Kotsu }
+        val minKotsu = fuuroList.find { fuuro ->
+            fuuro.mentsu is Kotsu && fuuro.tiles.any { it.mahjong4jTile == tile.mahjong4jTile }
+        }
         fuuroList -= minKotsu!!
         val kakantsu = Kakantsu(tile.mahjong4jTile)
         val tiles = minKotsu.tiles.toMutableList().also { it += tile }
@@ -212,7 +214,7 @@ abstract class MahjongPlayerBase {
                 val mentsuList = fuuroListCopy.map { fuuro -> fuuro.mentsu }
                 val calculatedMachi = buildList {
                     MahjongTile.entries.filter { mjTile ->
-                        mjTile.mahjong4jTile != it.mahjong4jTile
+                        mjTile.code == mjTile.mahjong4jTile.code && mjTile.mahjong4jTile != it.mahjong4jTile
                     }.forEach { mjTile ->
                         val mj4jTile = mjTile.mahjong4jTile
                         val nowHands = handsCopy.toIntArray().apply { this[mj4jTile.code]++ }
@@ -307,7 +309,7 @@ abstract class MahjongPlayerBase {
 
     private val tilePairsForRiichi
         get() = buildList {
-            if (hands.size != 14) return@buildList
+            if (hands.size != 14 - fuuroList.size * 3) return@buildList
             val listToAdd = buildList {
                 hands.forEach { tile ->
                     val nowHands = hands.toMutableList().also { it -= tile }
@@ -354,7 +356,7 @@ abstract class MahjongPlayerBase {
         val waitingHandSize = 13 - fuuroList.size * 3
         if (hands.size > waitingHandSize) return emptyList()
 
-        return MahjongTile.entries.filter {
+        return MahjongTile.entries.filter { it.code == it.mahjong4jTile.code }.filter {
             val tileInHandsCount = hands.count { t -> t.mahjong4jTile == it.mahjong4jTile }
             val tileInFuuroCount = fuuroList.sumOf { fuuro -> fuuro.tiles.count { t -> t.mahjong4jTile == it.mahjong4jTile } }
             val allTileHere = (tileInHandsCount + tileInFuuroCount) == 4
@@ -401,7 +403,7 @@ abstract class MahjongPlayerBase {
         machi: List<Tile> = this.machiTiles.map { it.mahjong4jTile },
     ): Boolean {
         val discardedTilesList = discardedTiles.map { it.mahjong4jTile }
-        if (tile in discardedTilesList) return true
+        if (machi.any { it in discardedTilesList }) return true
 
         // 同巡振听: 从自己最后一次打牌到现在，是否有听牌被打出
         if (lastDiscardAllIndex >= 0 && lastDiscardAllIndex < discards.size) {
@@ -420,19 +422,17 @@ abstract class MahjongPlayerBase {
     }
 
     fun isIppatsu(players: List<MahjongPlayerBase>, discards: List<MahjongTile>): Boolean {
-        if (riichi && riichiSengenTile != null) {
-            val riichiSengenIndex = discards.indexOf(riichiSengenTile!!)
-            if (riichiSengenIndex == -1 || discards.lastIndex - riichiSengenIndex > 4) return false
-            val someoneCalls = discards.slice(riichiSengenIndex..discards.lastIndex).any { tile ->
-                players.any { player ->
-                    player.fuuroList.any { fuuro ->
-                        tile in fuuro.tiles
-                    }
+        if (!(riichi || doubleRiichi) || riichiSengenTile == null) return false
+        if (riichiAllIndex < 0 || riichiAllIndex > discards.lastIndex) return false
+        if (discards.lastIndex - riichiAllIndex > players.size) return false
+        val someoneCalls = discards.slice(riichiAllIndex..discards.lastIndex).any { tile ->
+            players.any { player ->
+                player.fuuroList.any { fuuro ->
+                    tile in fuuro.tiles
                 }
             }
-            return !someoneCalls
         }
-        return false
+        return !someoneCalls
     }
 
     fun isKokushimuso(tile: Tile): Boolean {
@@ -471,6 +471,68 @@ abstract class MahjongPlayerBase {
         lastTile: Tile,
     ): Boolean = Hands(hands, lastTile, mentsuList).canWin
 
+    /**
+     * 修正 mahjong4j 0.3.2 已驗證的役種誤判:
+     * - 三色同順: 真三色漏判、非三色誤判 (依 comp 重算)
+     * - 三色同刻: 與三色同順相同模式, 一併重算
+     * - 三暗刻: 榮和補完的刻子應視為明刻
+     * - 平和: 邊張待ち (12待3 / 89待7) 被誤判為兩面
+     * - 純全/混全: 雀頭未檢查幺九、兩役錯誤疊加
+     */
+    private fun refineYakuStock(
+        yakuStock: MutableList<NormalYaku>,
+        comp: MentsuComp,
+        personalSituation: PersonalSituation,
+        winningTile: Tile,
+        handsIntArray: IntArray,
+    ) {
+        val suits = listOf(TileType.MANZU, TileType.PINZU, TileType.SOHZU)
+
+        val shuntsuNumbers = comp.shuntsuList.groupBy({ it.tile.type }, { it.tile.number })
+        val hasSanshokuJun = (2..8).any { n -> suits.all { t -> shuntsuNumbers[t]?.contains(n) == true } }
+        if (hasSanshokuJun) {
+            if (NormalYaku.SANSHOKUDOHJUN !in yakuStock) yakuStock += NormalYaku.SANSHOKUDOHJUN
+        } else yakuStock -= NormalYaku.SANSHOKUDOHJUN
+
+        val kotsuNumbers = comp.kotsuKantsu.filter { it.tile.number > 0 }.groupBy({ it.tile.type }, { it.tile.number })
+        val hasSanshokuKo = (1..9).any { n -> suits.all { t -> kotsuNumbers[t]?.contains(n) == true } }
+        if (hasSanshokuKo) {
+            if (NormalYaku.SANSHOKUDOHKO !in yakuStock) yakuStock += NormalYaku.SANSHOKUDOHKO
+        } else yakuStock -= NormalYaku.SANSHOKUDOHKO
+
+        val ronCompletedKotsu = !personalSituation.isTsumo && handsIntArray[winningTile.code] == 3 &&
+            comp.kotsuList.any { !it.isOpen && it.tile == winningTile }
+        val ankoCount = comp.kotsuKantsu.count { !it.isOpen } - if (ronCompletedKotsu) 1 else 0
+        if (ankoCount == 3) {
+            if (NormalYaku.SANANKO !in yakuStock) yakuStock += NormalYaku.SANANKO
+        } else yakuStock -= NormalYaku.SANANKO
+
+        if (NormalYaku.PINFU in yakuStock) {
+            val ryanmen = comp.shuntsuList.any {
+                !it.isOpen && it.tile.type == winningTile.type &&
+                    ((winningTile.number == it.tile.number - 1 && it.tile.number != 8) ||
+                        (winningTile.number == it.tile.number + 1 && it.tile.number != 2))
+            }
+            if (!ryanmen) yakuStock -= NormalYaku.PINFU
+        }
+
+        val honorTypes = setOf(TileType.FONPAI, TileType.SANGEN)
+        val jantoTile: Tile? = comp.janto?.tile
+        val chantaShape = comp.shuntsuList.isNotEmpty() &&
+            comp.shuntsuList.all { it.tile.number == 2 || it.tile.number == 8 } &&
+            comp.kotsuKantsu.all { it.tile.isYaochu } &&
+            jantoTile != null && jantoTile.isYaochu
+        val hasHonor = jantoTile?.type in honorTypes || comp.kotsuKantsu.any { it.tile.type in honorTypes }
+        val junchanTruth = chantaShape && !hasHonor
+        val chantaTruth = chantaShape && hasHonor
+        if (junchanTruth) {
+            if (NormalYaku.JUNCHAN !in yakuStock) yakuStock += NormalYaku.JUNCHAN
+        } else yakuStock -= NormalYaku.JUNCHAN
+        if (chantaTruth) {
+            if (NormalYaku.CHANTA !in yakuStock) yakuStock += NormalYaku.CHANTA
+        } else yakuStock -= NormalYaku.CHANTA
+    }
+
     private fun calculateYakuSettlement(
         winningTile: MahjongTile,
         isWinningTileInHands: Boolean,
@@ -493,11 +555,13 @@ abstract class MahjongPlayerBase {
         var finalNormalYakuList = mutableListOf<NormalYaku>()
         val finalYakumanList = mj4jPlayer.yakumanList.toMutableList()
         val finalDoubleYakumanList = mutableListOf<DoubleYakuman>()
+        if (!rule.localYaku && Yakuman.RENHO in finalYakumanList) finalYakumanList -= Yakuman.RENHO
+        // 庫未處理「榮和補完的刻子不算暗刻」: 雙碰榮和時四暗刻不成立
+        if (Yakuman.SUANKO in finalYakumanList && !personalSituation.isTsumo &&
+            handsIntArray[winningTile.mahjong4jTile.code] == 3
+        ) finalYakumanList -= Yakuman.SUANKO
         
         if (finalYakumanList.isNotEmpty()) {
-            if (!rule.localYaku) {
-                if (Yakuman.RENHO in finalYakumanList) finalYakumanList -= Yakuman.RENHO
-            }
             val handsWithoutWinningTile = hands.toMutableList().also { if (isWinningTileInHands) it -= winningTile }
             val machiBeforeWin = calculateMachi(handsWithoutWinningTile, fuuroList)
             when {
@@ -524,6 +588,7 @@ abstract class MahjongPlayerBase {
                 val yakuStock = mutableListOf<NormalYaku>()
                 val resolverSet = Mahjong4jYakuConfig.getNormalYakuResolverSet(comp, generalSituation, personalSituation)
                 resolverSet.filter { it.isMatch }.forEach { yakuStock += it.normalYaku }
+                refineYakuStock(yakuStock, comp, personalSituation, winningTile.mahjong4jTile, handsIntArray)
 
                 if (!rule.openTanyao && mj4jHands.isOpen && NormalYaku.TANYAO in yakuStock) yakuStock -= NormalYaku.TANYAO
 
@@ -570,6 +635,10 @@ abstract class MahjongPlayerBase {
                         else -> 0
                     }
                     tmpFu += finalComp.allMentsu.sumOf { it.fu }
+                    if (!personalSituation.isTsumo && handsIntArray[winningTile.mahjong4jTile.code] == 3) {
+                        finalComp.kotsuList.firstOrNull { !it.isOpen && it.tile == winningTile.mahjong4jTile }
+                            ?.let { tmpFu -= it.fu / 2 }
+                    }
                     tmpFu += if (finalComp.isKanchan(mj4jHands.last) ||
                         finalComp.isPenchan(mj4jHands.last) ||
                         finalComp.isTanki(mj4jHands.last)
@@ -641,7 +710,8 @@ abstract class MahjongPlayerBase {
         timeoutTile: MahjongTile,
         cannotDiscardTiles: List<MahjongTile>,
         skippable: Boolean,
-    ): MahjongTile = hands.findLast { it !in cannotDiscardTiles } ?: timeoutTile
+    ): MahjongTile =
+        hands.findLast { tile -> cannotDiscardTiles.none { it.mahjong4jTile == tile.mahjong4jTile } } ?: timeoutTile
 
     open suspend fun askToChii(
         tile: MahjongTile,

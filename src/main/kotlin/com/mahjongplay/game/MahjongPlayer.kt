@@ -4,6 +4,7 @@ import com.mahjongplay.interaction.ChatActionSender
 import com.mahjongplay.model.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
+import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.NamedTextColor
 import org.bukkit.Bukkit
 import org.bukkit.entity.Player
@@ -42,6 +43,12 @@ class MahjongPlayer(
     var riichiOriginalOptions: List<ActionDisplayOption> = emptyList()
     var riichiActionBarOverride: net.kyori.adventure.text.Component? = null
 
+    /**
+     * 當前不能打出的牌 (食替禁止), 僅在等待出牌期間有效
+     */
+    var discardForbiddenTiles: List<MahjongTile> = emptyList()
+        private set
+
     private val bukkitPlayer: Player? get() = Bukkit.getPlayer(UUID.fromString(uuid))
 
     private suspend fun <T> waitForBehaviorResult(
@@ -65,6 +72,16 @@ class MahjongPlayer(
     fun resolveAction(behavior: MahjongGameBehavior, data: String = ""): Boolean {
         val pending = pendingAction ?: return false
         if (behavior !in pending.behaviors) return false
+        if (behavior == MahjongGameBehavior.DISCARD) {
+            val tile = MahjongTile.entries.find { it.code == data.toIntOrNull() }
+            if (tile != null && discardForbiddenTiles.any { it.mahjong4jTile == tile.mahjong4jTile }) {
+                bukkitPlayer?.sendMessage(
+                    Component.text("[麻将] ", NamedTextColor.GOLD)
+                        .append(Component.text("食替禁止: 鸣牌后不能立即打出 ${tile.displayName}", NamedTextColor.RED))
+                )
+                return false
+            }
+        }
         return pending.deferred.complete(behavior to data)
     }
 
@@ -76,14 +93,22 @@ class MahjongPlayer(
         skippable: Boolean,
     ): MahjongTile {
         actionOptions = emptyList()
-        return waitForBehaviorResult(
-            behavior = MahjongGameBehavior.DISCARD,
-            waitingBehaviors = if (skippable) listOf(MahjongGameBehavior.DISCARD, MahjongGameBehavior.SKIP) else listOf(MahjongGameBehavior.DISCARD)
-        ) { behavior, data ->
-            val tileCode = data.toIntOrNull() ?: return@waitForBehaviorResult timeoutTile
-            if (behavior == MahjongGameBehavior.DISCARD) {
-                MahjongTile.entries.find { it.code == tileCode } ?: timeoutTile
-            } else timeoutTile
+        discardForbiddenTiles = cannotDiscardTiles.toList()
+        val safeTimeoutTile = hands.findLast { tile ->
+            discardForbiddenTiles.none { it.mahjong4jTile == tile.mahjong4jTile }
+        } ?: timeoutTile
+        try {
+            return waitForBehaviorResult(
+                behavior = MahjongGameBehavior.DISCARD,
+                waitingBehaviors = if (skippable) listOf(MahjongGameBehavior.DISCARD, MahjongGameBehavior.SKIP) else listOf(MahjongGameBehavior.DISCARD)
+            ) { behavior, data ->
+                val tileCode = data.toIntOrNull() ?: return@waitForBehaviorResult safeTimeoutTile
+                if (behavior == MahjongGameBehavior.DISCARD) {
+                    MahjongTile.entries.find { it.code == tileCode } ?: safeTimeoutTile
+                } else safeTimeoutTile
+            }
+        } finally {
+            discardForbiddenTiles = emptyList()
         }
     }
 
